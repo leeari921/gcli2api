@@ -273,7 +273,7 @@ def get_available_models(router_type="openai"):
         models.append(f"流式抗截断/{base_model}")
         
         # 支持thinking模式后缀与功能前缀组合
-        for thinking_suffix in ["-maxthinking", "-nothinking", "-search"]:
+        for thinking_suffix in ["-maxthinking", "-nothinking", "-search", "-search-maxthinking", "-search-nothinking"]:
             # 基础模型 + thinking后缀
             models.append(f"{base_model}{thinking_suffix}")
             
