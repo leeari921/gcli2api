@@ -257,6 +257,9 @@ def get_available_models(router_type="openai"):
     Returns:
         List of model names with feature prefixes
     """
+    # 定义所有可能的后缀组合，方便管理
+    all_thinking_suffixes = ["-maxthinking", "-nothinking", "-search", "-search-maxthinking", "-search-nothinking"]
+    
     models = []
     
     for base_model in BASE_MODELS:
