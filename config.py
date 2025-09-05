@@ -6,18 +6,20 @@ import os
 import toml
 from typing import Any, Optional
 
+# API Endpoints
+CODE_ASSIST_ENDPOINT = os.getenv("CODE_ASSIST_ENDPOINT", "https://cloudcode-pa.googleapis.com")
+
 # Client Configuration
 CLI_VERSION = "0.1.5"  # Match current gemini-cli version
 
 # 凭证目录
-CREDENTIALS_DIR = os.getenv("CREDENTIALS_DIR", "./creds")
+CREDENTIALS_DIR = "./creds"
 
 # 自动封禁配置
 AUTO_BAN_ENABLED = os.getenv("AUTO_BAN", "false").lower() in ("true", "1", "yes", "on")
 
-# 需要自动封禁的错误码 (可通过环境变量 AUTO_BAN_ERROR_CODES 覆盖)
-AUTO_BAN_ERROR_CODES = [400, 401, 403]
-
+# 需要自动封禁的错误码
+AUTO_BAN_ERROR_CODES = [400, 403]
 
 # Default Safety Settings for Google API
 DEFAULT_SAFETY_SETTINGS = [
@@ -30,13 +32,25 @@ DEFAULT_SAFETY_SETTINGS = [
 
 # Helper function to get base model name from any variant
 def get_base_model_name(model_name):
-    """Convert variant model name to base model name."""
-    # Remove all possible suffixes in order
+    """
+    将任何变体模型名称转换为其基础模型名称。
+    此函数会先剥离特性后缀（如 -假流式），然后迭代剥离功能后缀（如 -search, -maxthinking）。
+    """
+    # 首先，剥离特性后缀
+    base_name = get_base_model_from_feature_model(model_name)
+    
+    # 接下来，迭代剥离功能后缀，以处理组合情况
     suffixes = ["-maxthinking", "-nothinking", "-search"]
-    for suffix in suffixes:
-        if model_name.endswith(suffix):
-            return model_name[:-len(suffix)]
-    return model_name
+    
+    stripped = True
+    while stripped:
+        stripped = False
+        for suffix in suffixes:
+            if base_name.endswith(suffix):
+                base_name = base_name[:-len(suffix)]
+                stripped = True # 成功剥离一个后缀，再次循环以检查更多组合
+                
+    return base_name
 
 # Helper function to check if model uses search grounding
 def is_search_model(model_name):
@@ -76,19 +90,33 @@ def should_include_thoughts(model_name):
         # For all other modes, include thoughts
         return True
 
-# Dynamic Configuration System - Optimized for memory efficiency
+# Dynamic Configuration System
+_config_cache = {}
+_config_cache_time = 0
+
 def _load_toml_config() -> dict:
-    """Load configuration from dedicated config.toml file directly from disk."""
+    """Load configuration from dedicated config.toml file."""
+    global _config_cache, _config_cache_time
+    
     try:
         config_file = os.path.join(CREDENTIALS_DIR, "config.toml")
         
-        # Check if file exists
+        # Check if file exists and get modification time
         if not os.path.exists(config_file):
             return {}
         
-        # Load config directly from disk each time
+        file_time = os.path.getmtime(config_file)
+        
+        # Return cached config if file hasn't changed
+        if file_time <= _config_cache_time and _config_cache:
+            return _config_cache
+        
+        # Load fresh config
         with open(config_file, "r", encoding="utf-8") as f:
             toml_data = toml.load(f)
+        
+        _config_cache = toml_data
+        _config_cache_time = file_time
         
         return toml_data
     
@@ -118,12 +146,19 @@ def save_config_to_toml(config_data: dict) -> None:
         with open(config_file, "w", encoding="utf-8") as f:
             toml.dump(config_data, f)
         
+        # Force cache refresh
+        global _config_cache, _config_cache_time
+        _config_cache = config_data
+        _config_cache_time = os.path.getmtime(config_file)
+        
     except Exception as e:
         raise Exception(f"Failed to save config: {e}")
 
 def reload_config_cache() -> None:
-    """Reload configuration - now a no-op since we read directly from disk."""
-    pass  # No cache to reload since we read from disk each time
+    """Force reload configuration cache."""
+    global _config_cache, _config_cache_time
+    _config_cache = {}
+    _config_cache_time = 0
 
 # Proxy Configuration
 def get_proxy_config():
@@ -138,22 +173,16 @@ def get_proxy_config():
 
 # Dynamic configuration getters
 def get_calls_per_rotation() -> int:
-    """
-    Get calls per rotation setting.
-    
-    Environment variable: CALLS_PER_ROTATION
-    TOML config key: calls_per_rotation
-    Default: 100
-    """
-    env_value = os.getenv("CALLS_PER_ROTATION")
-    if env_value:
-        try:
-            return int(env_value)
-        except ValueError:
-            pass
-    
-    return int(get_config_value("calls_per_rotation", 100))
+    """Get calls per rotation setting."""
+    return int(get_config_value("calls_per_rotation", 10))
 
+def get_http_timeout() -> float:
+    """Get HTTP timeout setting."""
+    return float(get_config_value("http_timeout", 30.0))
+
+def get_max_connections() -> int:
+    """Get max connections setting."""
+    return int(get_config_value("max_connections", 100))
 
 def get_auto_ban_enabled() -> bool:
     """Get auto ban enabled setting."""
@@ -164,20 +193,7 @@ def get_auto_ban_enabled() -> bool:
     return bool(get_config_value("auto_ban_enabled", AUTO_BAN_ENABLED))
 
 def get_auto_ban_error_codes() -> list:
-    """
-    Get auto ban error codes.
-    
-    Environment variable: AUTO_BAN_ERROR_CODES (comma-separated, e.g., "400,403")
-    TOML config key: auto_ban_error_codes
-    Default: [400, 403]
-    """
-    env_value = os.getenv("AUTO_BAN_ERROR_CODES")
-    if env_value:
-        try:
-            return [int(code.strip()) for code in env_value.split(",") if code.strip()]
-        except ValueError:
-            pass
-    
+    """Get auto ban error codes."""
     toml_codes = get_config_value("auto_ban_error_codes")
     if toml_codes and isinstance(toml_codes, list):
         return toml_codes
@@ -245,6 +261,7 @@ BASE_MODELS = [
     "gemini-2.5-pro", 
     "gemini-2.5-pro-preview-05-06",
     "gemini-2.5-flash",
+    "gemini-2.5-flash-preview-05-20"
 ]
 
 def get_available_models(router_type="openai"):
@@ -257,12 +274,15 @@ def get_available_models(router_type="openai"):
     Returns:
         List of model names with feature prefixes
     """
-    # 定义所有可能的后缀组合，方便管理
+
+    # 将所有可能的后缀定义在一个列表中，方便管理
     all_thinking_suffixes = ["-maxthinking", "-nothinking", "-search", "-search-maxthinking", "-search-nothinking"]
     
+
     models = []
     
     for base_model in BASE_MODELS:
+        # 1. 添加基础模型及其前缀版本 (这部分逻辑不变)
         # 基础模型
         models.append(base_model)
         
@@ -271,17 +291,31 @@ def get_available_models(router_type="openai"):
         
         # 流式抗截断模型 (仅在流式传输时有效，前缀格式)
         models.append(f"流式抗截断/{base_model}")
+
+
+        # 2. 根据模型名称决定要添加的后缀列表
+        suffixes_to_add = []
+        if "gemini-2.5-flash" in base_model:
+            # 如果是 flash 模型，只添加 "-search"
+            suffixes_to_add = ["-search"]
+        elif "gemini-2.5-pro" in base_model:
+            # 如果是 pro 模型
+            suffixes_to_add = all_thinking_suffixes
+        else:
+            # 其他所有模型，添加全部后缀
+            suffixes_to_add = all_thinking_suffixes
+
         
-        # 支持thinking模式后缀与功能前缀组合
-        for thinking_suffix in ["-maxthinking", "-nothinking", "-search", "-search-maxthinking", "-search-nothinking"]:
+        # 3. 遍历上一步确定的后缀列表，并生成最终模型名称
+        for suffix in suffixes_to_add:
             # 基础模型 + thinking后缀
-            models.append(f"{base_model}{thinking_suffix}")
+            models.append(f"{base_model}{suffix}")
             
             # 假流式 + thinking后缀
-            models.append(f"假流式/{base_model}{thinking_suffix}")
+            models.append(f"假流式/{base_model}{suffix}")
             
             # 流式抗截断 + thinking后缀
-            models.append(f"流式抗截断/{base_model}{thinking_suffix}")
+            models.append(f"流式抗截断/{base_model}{suffix}")
     
     return models
 
@@ -346,41 +380,9 @@ def get_server_port() -> int:
     
     return int(get_config_value("port", 7861))
 
-def get_api_password() -> str:
-    """
-    Get API password setting for chat endpoints.
-    
-    Environment variable: API_PASSWORD
-    TOML config key: api_password
-    Default: Uses PASSWORD env var for compatibility, otherwise 'pwd'
-    """
-    # 优先使用 API_PASSWORD，如果没有则使用通用 PASSWORD 保证兼容性
-    api_password = get_config_value("api_password", None, "API_PASSWORD")
-    if api_password:
-        return str(api_password)
-    
-    # 兼容性：使用通用密码
-    return str(get_config_value("password", "pwd", "PASSWORD"))
-
-def get_panel_password() -> str:
-    """
-    Get panel password setting for web interface.
-    
-    Environment variable: PANEL_PASSWORD
-    TOML config key: panel_password
-    Default: Uses PASSWORD env var for compatibility, otherwise 'pwd'
-    """
-    # 优先使用 PANEL_PASSWORD，如果没有则使用通用 PASSWORD 保证兼容性
-    panel_password = get_config_value("panel_password", None, "PANEL_PASSWORD")
-    if panel_password:
-        return str(panel_password)
-    
-    # 兼容性：使用通用密码
-    return str(get_config_value("password", "pwd", "PASSWORD"))
-
 def get_server_password() -> str:
     """
-    Get server password setting (deprecated, use get_api_password or get_panel_password).
+    Get server password setting.
     
     Environment variable: PASSWORD
     TOML config key: password
@@ -406,7 +408,7 @@ def get_code_assist_endpoint() -> str:
     TOML config key: code_assist_endpoint
     Default: https://cloudcode-pa.googleapis.com
     """
-    return str(get_config_value("code_assist_endpoint", "https://cloudcode-pa.googleapis.com", "CODE_ASSIST_ENDPOINT"))
+    return str(get_config_value("code_assist_endpoint", CODE_ASSIST_ENDPOINT, "CODE_ASSIST_ENDPOINT"))
 
 def get_auto_load_env_creds() -> bool:
     """
@@ -421,69 +423,3 @@ def get_auto_load_env_creds() -> bool:
         return env_value.lower() in ("true", "1", "yes", "on")
     
     return bool(get_config_value("auto_load_env_creds", False))
-
-def get_compatibility_mode_enabled() -> bool:
-    """
-    Get compatibility mode setting.
-    
-    兼容性模式：启用后所有system消息全部转换成user，停用system_instructions。
-    该选项可能会降低模型理解能力，但是能避免流式空回的情况。
-    
-    Environment variable: COMPATIBILITY_MODE
-    TOML config key: compatibility_mode_enabled
-    Default: True
-    """
-    env_value = os.getenv("COMPATIBILITY_MODE")
-    if env_value:
-        return env_value.lower() in ("true", "1", "yes", "on")
-    
-    return bool(get_config_value("compatibility_mode_enabled", True))
-
-def get_oauth_proxy_url() -> str:
-    """
-    Get OAuth proxy URL setting.
-    
-    用于Google OAuth2认证的代理URL。
-    
-    Environment variable: OAUTH_PROXY_URL
-    TOML config key: oauth_proxy_url
-    Default: https://oauth2.googleapis.com
-    """
-    return str(get_config_value("oauth_proxy_url", "https://oauth2.googleapis.com", "OAUTH_PROXY_URL"))
-
-def get_googleapis_proxy_url() -> str:
-    """
-    Get Google APIs proxy URL setting.
-    
-    用于Google APIs调用的代理URL。
-    
-    Environment variable: GOOGLEAPIS_PROXY_URL
-    TOML config key: googleapis_proxy_url
-    Default: https://www.googleapis.com
-    """
-    return str(get_config_value("googleapis_proxy_url", "https://www.googleapis.com", "GOOGLEAPIS_PROXY_URL"))
-
-
-def get_resource_manager_api_url() -> str:
-    """
-    Get Google Cloud Resource Manager API URL setting.
-    
-    用于Google Cloud Resource Manager API的URL。
-    
-    Environment variable: RESOURCE_MANAGER_API_URL
-    TOML config key: resource_manager_api_url
-    Default: https://cloudresourcemanager.googleapis.com
-    """
-    return str(get_config_value("resource_manager_api_url", "https://cloudresourcemanager.googleapis.com", "RESOURCE_MANAGER_API_URL"))
-
-def get_service_usage_api_url() -> str:
-    """
-    Get Google Cloud Service Usage API URL setting.
-    
-    用于Google Cloud Service Usage API的URL。
-    
-    Environment variable: SERVICE_USAGE_API_URL
-    TOML config key: service_usage_api_url
-    Default: https://serviceusage.googleapis.com
-    """
-    return str(get_config_value("service_usage_api_url", "https://serviceusage.googleapis.com", "SERVICE_USAGE_API_URL"))
